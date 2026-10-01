@@ -1,0 +1,7 @@
+deepface
+fastapi
+opencv-python-headless
+python-multipart
+requests
+streamlit
+uvicorn[standard]

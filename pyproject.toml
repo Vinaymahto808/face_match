@@ -1,0 +1,25 @@
+[project]
+name = "carrier"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Vinaymahto808", email = "vinaykumar16244@gmail.com" }
+]
+requires-python = ">=3.13"
+dependencies = [
+    "deepface",
+    "fastapi",
+    "opencv-python-headless",
+    "python-multipart",
+    "requests",
+    "streamlit",
+    "uvicorn[standard]"
+]
+
+[project.scripts]
+carrier = "carrier:main"
+
+[build-system]
+requires = ["uv_build>=0.12.18,<0.13.0"]
+build-backend = "uv_build"
