@@ -2,14 +2,14 @@
 
 A local Streamlit interface backed by FastAPI and DeepFace. Capture two images to compare them. If DeepFace reports a match, the UI also displays the age, gender, race, and emotion analysis returned for each image, along with the full verification metadata.
 
-Install Python 3.11 before setup. The workspace's Python 3.14 environment does not have DeepFace installed and may not be supported by the TensorFlow build required for inference.
+Use Python 3.13 or newer, matching the `requires-python` setting in `pyproject.toml`. The current workspace has Python 3.14, but DeepFace is not installed there yet.
 
 ## Run on Windows
 
 Create and activate an environment, then install the dependencies:
 
 ```powershell
-py -3.11 -m venv .venv
+py -3.13 -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
@@ -30,4 +30,4 @@ Open the local URL printed by Streamlit. The first verification may take longer 
 
 Phone cameras are supported by the two camera controls in the app. Open the app from the phone using an HTTPS URL and allow camera access; mobile browsers generally block live camera access on a LAN `http://` URL. A secure HTTPS deployment or reverse proxy is needed for phone access outside the local computer.
 
-Only use images you have permission to process. Uploaded images are processed in memory and are not written to disk by this app.
+Only use images you have permission to process. Captured images are held in Streamlit session memory and are not written to disk by this app.

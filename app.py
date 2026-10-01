@@ -18,6 +18,8 @@ st.markdown(
 )
 st.markdown('<div class="eyebrow">FACE VERIFICATION / DEEPFACE</div>', unsafe_allow_html=True)
 st.title("Compare two faces")
+st.caption("Capture two photos in sequence. For phone camera access, open this app over HTTPS and allow permission.")
+st.caption("DeepFace compares the captured pair; `pyproject.toml` is project configuration, not a training-image folder.")
 for key, default in {
     "reference_bytes": None,
     "reference_type": "image/jpeg",
