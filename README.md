@@ -12,6 +12,88 @@ small number of business rules that a test can point at.
 - [`docs/flowcharts.txt`](docs/flowcharts.txt) — 8 ASCII diagrams, from system context to deployment topology
 - [`.env.example`](.env.example) — every setting, documented inline
 - `/docs` while the app is running — generated OpenAPI UI
+- [Output](#output--same-person) — what a run looks like, step by step
+
+---
+
+## Output — "Same person?"
+
+[`streamlit_app.py`](streamlit_app.py) runs the notebook's four cells in order, in the
+browser: describe the first face, take a second photo, then compare the two with DeepFace.
+
+```bash
+uv run streamlit run streamlit_app.py
+# or, without uv:
+.venv\Scripts\python.exe -m streamlit run streamlit_app.py
+```
+
+Each step shows a summary card and, underneath it, the same text the notebook printed.
+
+### Example output
+
+#### Step 1 — take a photo and describe the face
+
+Photo from **Camera 1** → *1 face(s) detected — largest one: Man, about 22, neutral.*
+
+![Step 1 — detected face with age, gender and emotion](docs/images/step1_analysis.png)
+
+| Age | Gender | Emotion |
+|---|---|---|
+| 22 | Man | neutral |
+
+| Scores | |
+|---|---|
+| Race | black 82.58% · latino hispanic 8.38% · indian 5.54% · asian 1.92% · white 0.92% · middle eastern 0.66% |
+| Emotion | neutral 99.73% · angry 0.15% · sad 0.09% · fear 0.02% · disgust 0.0% · happy 0.0% · surprise 0.0% |
+| Gender | Man 100.0% · Woman 0.0% |
+
+Notebook output:
+
+```text
+Analysis Results:
+-----------------
+Face Detected at: {'x': 320, 'y': 184, 'w': 155, 'h': 155, 'left_eye': None, 'right_eye': None}
+Face confidence: 0.96
+Age: 22
+Gender: Man ({'Woman': 0.0, 'Man': 100.0})
+Race: black ({'asian': 1.92, 'indian': 5.54, 'black': 82.58, 'white': 0.92, 'middle eastern': 0.66, 'latino hispanic': 8.38})
+Emotion: neutral ({'angry': 0.15, 'disgust': 0.0, 'fear': 0.02, 'happy': 0.0, 'sad': 0.09, 'surprise': 0.0, 'neutral': 99.73})
+```
+
+#### Step 2 — take a second photo and verify
+
+Photo from **Camera 2** → ✅ **Verification Result: Same Person**
+
+![Step 2 — first and second image side by side, verified as the same person](docs/images/step2_verification.png)
+
+| Distance | Threshold | Time |
+|---|---|---|
+| 0.070 | 0.40 | 10.96 s |
+
+Facenet · opencv · cosine — a distance **below** the threshold means the same person.
+
+Notebook output:
+
+```text
+Verification Result:
+result.get('verified')=True, round(float(result.get('distance', 0)), 4)=0.0701 (cosine distance, below the threshold means the same person), round(float(result.get('threshold', 0)), 2)=0.4, result.get('model')='Facenet', result.get('detector_backend')='opencv', result.get('similarity_metric')='cosine', round(float(result.get('time', 0)), 2)=10.96s
+facial_areas: {'img1': {'x': 320, 'y': 184, 'w': 155, 'h': 155, 'left_eye': None, 'right_eye': None}, 'img2': {'x': 295, 'y': 149, 'w': 153, 'h': 153, 'left_eye': None, 'right_eye': None}}
+
+The two images belong to the same person.
+```
+
+### Reading the result
+
+| Field | Meaning |
+|---|---|
+| `verified` | `True` when `distance <= threshold` |
+| `distance` | Cosine distance between the two face embeddings; `0` = identical, smaller = more alike |
+| `threshold` | DeepFace's tuned cut-off for this model and metric (Facenet + cosine = `0.40`) |
+| `facial_areas` | Face box in each photo; `left_eye`/`right_eye` are `None` because the `opencv` detector found no eye landmarks |
+| `time` | Seconds for the whole verify call, including detection |
+
+Here `0.0701` is far below `0.40`, so the match is clear. Values close to the threshold
+(about `0.32–0.40`) are borderline; retake the photo with the face straight on and in good light.
 
 ---
 
