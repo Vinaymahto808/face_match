@@ -1,0 +1,49 @@
+# Keep the build context small and stop host artefacts leaking into the image.
+# A stale local venv is ~1.5 GB and a host cv2 build will shadow the pinned
+# headless one if it ever gets copied in.
+
+.venv/
+venv/
+env/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local state: the SQLite database is per-machine. Baking it in would ship one
+# developer's enrolments and attendance rows to production.
+data/
+*.db
+*.sqlite3
+*.sqlite3-*
+
+# Secrets. .env is read by pydantic-settings at startup; it must be injected
+# by the platform, never copied into a layer where it survives in history.
+# The **/ prefix matters: a bare `.env` pattern only matches the repo root, so
+# without it a nested app/.env (or .env.* inside any subdirectory) ships.
+**/.env
+**/.env.*
+!.env.example
+
+# Model artefacts are downloaded at build time into DEEPFACE_HOME.
+*.h5
+*.onnx
+*.pt
+
+# VCS and editor noise
+.git/
+.gitignore
+.github/
+.vscode/
+.idea/
+
+# Docs and tests are not needed at runtime.
+docs/
+tests/
+*.md
+!README.md
+Dockerfile
+.dockerignore

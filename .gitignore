@@ -1,0 +1,22 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+# **/ matters: a bare `.env` only matches the repo root, so a nested one
+# (app/.env) would be committed and its keys published.
+**/.env
+**/.env.*
+!.env.example
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# local database + model artefacts
+data/
+*.db
+*.sqlite3
+*.onnx
+*.h5
+*.pt
+.temp_frame_*

@@ -1,0 +1,33 @@
+# This file is intentionally a pointer, not a dependency list.
+#
+# The single source of truth for dependencies is `pyproject.toml` (ranges and
+# extras) plus `uv.lock` (the exact resolved set). A hand-maintained
+# requirements.txt alongside them is a second source of truth, and the two
+# drift: this file previously pinned fastapi==0.141.1 / SQLAlchemy==2.0.54
+# while the lock resolved 0.142.1 / 2.1.1, and its face-stack entries were
+# commented out entirely -- so a `pip install -r requirements.txt` produced an
+# environment in which the face backend silently could not load.
+#
+# Local development:
+#
+#     uv venv --python 3.12            # TF has no 3.13/3.14 wheels
+#     uv sync --extra face --extra liveness --extra dev
+#     .venv\Scripts\python -m uvicorn app.main:app --reload
+#
+# Container build (see Dockerfile) uses `uv sync --frozen`, so the image is
+# built from the lock and fails loudly rather than re-resolving.
+#
+# If you genuinely need a pip-installable list, generate it on demand instead
+# of maintaining it by hand -- it will carry hashes and ~1100 lines:
+#
+#     uv export --frozen --no-dev --extra face --extra liveness \
+#         --no-emit-project --format requirements-txt -o requirements.txt
+#
+# Note: two runtime pins are load-bearing and easy to lose, because neither
+# looks like a direct requirement of this project.
+#
+#   * opencv-python-headless must stay <5. OpenCV 5 removed
+#     cv2.CascadeClassifier, the eye detector behind the blink challenge.
+#   * tf-keras is required by deepface whenever TensorFlow is on Keras 3.
+#
+# Both are declared in pyproject.toml, with the reasoning inline.

@@ -1,0 +1,66 @@
+# Local / single-host deployment.
+#
+# One container, one SQLite file, no orchestrator. This is deliberately the
+# simplest thing that satisfies the requirements -- if you are reaching for
+# more than this, read ARCHITECTURE.md section 9 (Scale path) first and change
+# one thing at a time.
+#
+#   cp .env.example .env        # then edit: API_KEYS, CORS_ORIGINS, ENVIRONMENT
+#   docker compose up --build
+#   curl localhost:8000/health/ready
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: face-attendance-api:latest
+    # env_file is read by docker-compose and injected as real environment
+    # variables. It is NOT baked into the image (see .dockerignore), so
+    # rotating a key here does not require a rebuild.
+    env_file:
+      - .env
+    environment:
+      # Override anything that must be host-specific regardless of what .env
+      # says. Compose interpolates ${VAR:-default} from your shell/.env.
+      ENVIRONMENT: ${ENVIRONMENT:-prod}
+      # Bind-mounted at /app/data below, so the DB survives `up --build`.
+      DATABASE_URL: sqlite:////app/data/attendance.db
+      BUSINESS_TIMEZONE: ${BUSINESS_TIMEZONE:-Asia/Kolkata}
+    ports:
+      # Bound to loopback on purpose: put a TLS-terminating reverse proxy in
+      # front of this. Face frames and attendance are not something to serve
+      # over plain HTTP to a LAN.
+      - "127.0.0.1:8000:8000"
+    volumes:
+      # Attendance rows must outlive the container. Without this, `down` takes
+      # the enrolment database with it. A fresh named volume inherits the
+      # ownership of the image's mount point, which the Dockerfile already set
+      # to the non-root `app` user -- so no chown step is needed here.
+      - attendance-data:/app/data
+    restart: unless-stopped
+    # Compose's own healthcheck relies on the image's HEALTHCHECK; `depends_on:
+    # condition: service_healthy` then works for anything you add later.
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=4).status == 200 else 1)"
+      interval: 30s
+      timeout: 5s
+      # Generous: the first boot loads TensorFlow and the Facenet weights.
+      # /health/ready reports 503 until the model is actually resident, so a
+      # short start-period would restart-loop a healthy cold start.
+      start_period: 180s
+      retries: 3
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+volumes:
+  attendance-data:

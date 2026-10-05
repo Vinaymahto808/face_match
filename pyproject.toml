@@ -1,0 +1,100 @@
+[project]
+name = "face-attendance-api"
+version = "1.0.0"
+description = "Face recognition attendance API with active + passive anti-spoofing"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+    "pydantic>=2.7",
+    "pydantic-settings>=2.3",
+    "SQLAlchemy>=2.0",
+    "numpy>=1.26",
+    "pillow>=10.0",
+    # zoneinfo reads /usr/share/zoneinfo on Linux but has no such store on
+    # Windows, where this package is the only source of the IANA database.
+    # BUSINESS_TIMEZONE is validated at startup, so omitting it makes the app
+    # fail to import on Windows rather than merely default oddly.
+    "tzdata>=2024.1",
+    "streamlit>=1.65.0",
+    "deepface>=0.0.101",
+    "opencv-python>=5.0.0.93",
+]
+
+[project.optional-dependencies]
+# DeepFace needs TensorFlow, which has no CPython 3.14 wheels.
+face = [
+    "deepface>=0.0.93",
+    "tensorflow>=2.16",
+    # Required by deepface when TensorFlow is on Keras 3 (TF >= 2.16):
+    # "You have tensorflow 2.21.0 and this requires tf-keras package."
+    # Without this, `import deepface` raises at module import and the face
+    # backend never loads.
+    "tf-keras>=2.16",
+    # MUST stay <5. OpenCV 5 removed cv2.CascadeClassifier, which is the eye
+    # detector behind the blink challenge. Losing it does not crash: liveness
+    # reports itself unavailable and REQUIRE_LIVENESS then refuses every punch.
+    # See app/services/liveness/geometry.py.
+    "opencv-python-headless>=4.9,<5",
+]
+liveness = ["onnxruntime>=1.17"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.24", "httpx>=0.27", "ruff>=0.6"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.uv]
+# deepface hard-requires `opencv-python` (the GUI build). Installing it next to
+# `opencv-python-headless` puts two distributions in charge of the same `cv2`
+# package, so whichever lands last decides whether CascadeClassifier exists.
+# Marking it unsatisfiable leaves the headless build as the sole owner of cv2 --
+# which is also what the server image needs, since opencv-python needs libGL and
+# fails to import under python:*-slim.
+override-dependencies = ["opencv-python ; sys_platform == 'never'"]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q --strict-markers"
+filterwarnings = [
+    "ignore::DeprecationWarning:pytest_asyncio.*",
+    "ignore::DeprecationWarning:asyncio.*",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+# E/F/I/N/UP/B/SIM/C4/RUF  correctness, style, imports, complexity-ish
+# BLE  a bare `except Exception` that swallows a failure silently is how a
+#       liveness check quietly stops being enforced; require it be logged
+#       or deliberately annotated with # noqa and a reason.
+# S    bandit rules. Only the few that matter for a network service are kept
+#       meaningful -- S101 is ignored because asserts are the test oracle.
+# DTZ  every timestamp in this app is timezone-aware by construction
+#       (app.models.utcnow + the UTCDateTime TypeDecorator). Locking that in
+#       with a lint rule beats discovering it from a wrong punch time.
+# T20  no stray print() in the library; app.py is a CLI and is exempt below.
+# ISC  implicit string concatenation that silently drops a space.
+select = ["E", "F", "I", "N", "UP", "B", "SIM", "C4", "RUF", "BLE", "S", "DTZ", "T20", "ISC"]
+ignore = [
+    "E501",    # long lines are handled by the formatter, not the linter
+    "B008",    # FastAPI's Depends()/File() in defaults is the documented idiom
+    "N818",    # exception names need not end in Error
+    "RUF001",  # ambiguous unicode in strings
+    "S101",    # assert is how a test states its expectation
+    "T201",    # print() is the point of app.py and scripts/; suppressed per-path
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["N802", "B011", "PLC0415", "S105", "S106"]
+# The CLI entrypoint is the one place that is supposed to talk to a human.
+"app.py" = ["T201"]
+"kiosk.py" = ["T201"]
+"simple_app.py" = ["T201"]
+"scripts/*" = ["T201"]

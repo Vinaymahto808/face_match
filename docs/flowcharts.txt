@@ -1,0 +1,342 @@
+================================================================================
+ FACE ATTENDANCE SYSTEM - VISUAL FLOWCHART PACK
+ ASCII / box-drawing edition (read in any terminal, no renderer needed)
+ Repo: face_detection   Layer target: FastAPI + DeepFace + SQLite
+ Legend:  [ ] process   ( ) decision   < > data store   { } external/system
+          -->  control/data flow        --->  async/event flow
+          (solid) = sync request        (dashed) = webhook / alert
+================================================================================
+
+--------------------------------------------------------------------------------
+ DIAGRAM 1 - SYSTEM CONTEXT
+--------------------------------------------------------------------------------
+                       +--------------------------+
+                       |   Physical World         |
+                       |  - Person at a gate/kiosk|
+                       |  - Employee in office    |
+                       |  - ID card / photo       |
+                       +------------+-------------+
+                                    | camera frames
+                                    v
+   +---------------------------------------------------------------+
+   |                    FACE ATTENDANCE SYSTEM                      |
+   |  [verify who is here] [prove it is a real face] [record punch]  |
+   +---------------------------------------------------------------+
+             ^                    ^                      |
+             | enroll             | punch                v
+             |                    |              +------------------+
+   +---------+---------+   +------+------+       |  HR / Payroll    |
+   | Admin / HR        |   | Kiosk / Edge |       |  (read-only)     |
+   | (upload samples)  |   | Web client   |       +------------------+
+   +-------------------+   +-------------+                    ^
+                                                             | export
+   +-------------------+   +------------------+      +---------+---------+
+   | Face attendance  |   | Alert channel   |      | CSV / reports    |
+   | roster store     |   | (Slack, Pager)  |      +-------------------+
+   +-------------------+   +------------------+
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 2 - CONTAINER / LAYER VIEW
+--------------------------------------------------------------------------------
+ +==================================================================+
+ |  CLIENT TIER                                                      |
+ |  [Kiosk browser]  [Mobile app]  [HR admin portal]  [Webhook sub]  |
+ +=============================+===================================+
+                               |  HTTPS / JSON / multipart
+                               v
+ +==================================================================+
+ |  EDGE / TRANSPORT            (Uvicorn, N workers behind a proxy)  |
+ |  [TLS terminate]  [rate limit]  [X-API-Key auth]  [CORS]          |
+ +=============================+===================================+
+                               v
+ +==================================================================+
+ |  API TIER   app/api/                                              |
+ |  routers:  /enrollment  /liveness  /attendance  /users  /events   |
+ |  - pydantic schemas in / out (app/schemas/)                        |
+ |  - auth + rate-limit deps                                         |
+ +=============================+===================================+
+                               v
+ +==================================================================+
+ |  DOMAIN / SERVICE TIER   app/services/                            |
+ |  +----------------+  +----------------+  +--------------------+  |
+ |  | recognition.py |  | liveness.py    |  | attendance.py      |  |
+ |  | - detect face  |  | - passive      |  | - business-day     |  |
+ |  | - embed        |  | - active       |  |   bucketing        |  |
+ |  | - 1:1 match    |  | - session FSM  |  | - idempotent punch |  |
+ |  | - thresholds   |  | - lockout      |  | - first/last seen  |  |
+ |  +-------+--------+  +--------+-------+  +----------+---------+  |
+ |          |                      |                    |            |
+ |          |        +-------------v---------+          |            |
+ |          |        | embeddings.py        |          |            |
+ |          |        | pack/unpack float32  |          |            |
+ |          |        | l2 normalise         |          |            |
+ |          |        | cosine matmul match  |          |            |
+ |          |        +----------------------+          |            |
+ |          +-------------------+---------------------+            |
+ |                              |                                  |
+ |  +----------------+  +--------v-------+  +-------------------+   |
+ |  | events.py      |  | models.py (ORM)|  | timeutil.py       |   |
+ |  | - audit + alert|  | 7 tables       |  | - business tz     |   |
+ |  | - webhook POST |  | - constraints  |  | - day key         |   |
+ |  +----------------+  +--------+-------+  +-------------------+   |
+ +=============================+===================================+
+                               v
+ +==================================================================+
+ |  PERSISTENCE   SQLite (WAL)                                        |
+ |  users | enrollment_sessions | enrollment_samples                   |
+ |  liveness_sessions | attendance | events                           |
+ |  Written on a dedicated disk volume, hourly snapshot.             |
+ +==================================================================+
+                               ||
+                               v  (optional, off by default)
+ +==================================================================+
+ |  ML RUNTIME   deepface -> Facenet / ArcFace  +  optional minFASNet |
+ |  Loaded once per worker, cached. Never imported per-request.       |
+ +==================================================================+
+
+   Cross-cutting: config.py (pydantic-settings) drives every knob above;
+   no value is hard-coded in a router or service.
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 3 - ENROLLMENT SEQUENCE (multi-frame averaging)
+--------------------------------------------------------------------------------
+  Client            API               recognition          db              events
+    |                 |                    |                |                |
+    |--POST /enroll   |                    |                |                |
+    |  {user_id,name} |                    |                |                |
+    |---------------->|                    |                |                |
+    |                 |--create session-->|                |                |
+    |                 |----------------------->INSERT----->|                |
+    |                 |<--session_id, need=5 samples------|                |
+    |<--202 {session_id, samples_needed}----|                |                |
+    |                 |                    |                |                |
+    |  loop x5        |                    |                |                |
+    |--POST /enroll   |                    |                |                |
+    |  {session_id,   |                    |                |                |
+    |   image(jpeg)}  |                    |                |                |
+    |---------------->|                    |                |                |
+    |                 |--decode+resize---->|                |                |
+    |                 |--size guard (bytes, edge)---------> |                |
+    |                 |--detect+embed (Facenet)------------>|                |
+    |                 |--quality score 0..1 (blur/bright/size/pose)         |
+    |                 |---INSERT enrollment_samples (blob)--->|                |
+    |                 |<--ok-------------------------------|                |
+    |<--{samples_ok, quality, next_hint}-----|                |                |
+    |                 |                    |                |                |
+    |            ( ) samples == samples_needed ?              |                |
+    |                 |--- no --> client: "keep sending"      |                |
+    |                 |--- yes ------------------------------>|                |
+    |                 |     mean(stack) -> l2_normalise -> pack              |
+    |                 |     UPSERT users(user_id, blob, dim, model,          |
+    |                 |            sample_count, quality)                 |
+    |                 |     session.status = 'completed'                  |
+    |                 |<--done-------------------------------|                |
+    |<--201 {user_id, name, model, samples}-----|                |                |
+    |                 |                    |                |                |
+    |            ( ) any sample quality < min ?              |                |
+    |                 |--- yes --> INSERT event(kind='enroll_low_quality')   |
+    |                 |            severity='warning' ------------------------>|
+    |                 |            POST alert_webhook (dashed) -------------->|
+    |                 |                    |                |                |
+
+  Re-enrol of an existing user_id = UPSERT, so re-registration replaces the
+  vector instead of creating a duplicate identity.
+
+  Rollout gate: a user is NOT active for attendance until a completed
+  enrolment exists. Live matching only loads is_active users with a model_name
+  equal to the active FACE_MODEL_NAME.
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 4 - LIVE ATTENDANCE PUNCH (the critical path)
+--------------------------------------------------------------------------------
+  Kiosk                 API              liveness            recognition   db
+    |                    |                    |                   |         |
+    |== face detected ==>|                    |                   |         |
+    |--POST /liveness/session {user_id?}|    |                   |         |
+    |------------------>|                    |                   |         |
+    |                    |--rand. order + randomised reveal times-------->|
+    |                    |  +--INSERT liveness_sessions (status=pending)->|
+    |<--201 {session_id, challenges:[{type, revealed_at}]}------|          |
+    |                    |                    |                   |         |
+    |  [ person completes the prompted gestures, in order ]      |         |
+    |                    |                    |                   |         |
+    |--POST /liveness/frame {session_id, image} (N frames)      |         |
+    |------------------>|--detect+embed + geometry ------------->|         |
+    |                    |--passive liveness (texture/colour/blur)         |
+    |                    |--active challenge check against reveal window  |
+    |                    |--update session {attempts, status, scores}     |
+    |<--{challenge, done, satisfied, attempts_left}-----------|           |
+    |                    |                    |                   |         |
+    |            ( ) REQUIRE_LIVENESS and no passed token ?     |         |
+    |                 |--- yes --> 428 PRECONDITION_REQUIRED:    |         |
+    |                 |           "liveness_token required"       |         |
+    |                 |--- no ---------------------------------->|         |
+    |                    |                    |                   |         |
+    |--POST /attendance/punch                                     |         |
+    |  {liveness_token, image?, device_id}                       |         |
+    |------------------>|--consume token (single use)------------>|         |
+    |                    |--embed live face ---------------------->|         |
+    |                    |     1:N roster cosine matmul                |         |
+    |                    |              |                   |         |
+    |                    |       ( ) d < MATCH_THRESHOLD ?              |         |
+    |                    |            |--- yes -> MATCH ----------------->|         |
+    |                    |       ( ) d < threshold*GRAY_FACTOR ?         |         |
+    |                    |            |--- yes -> REVIEW (flag, no silent  |         |
+    |                    |            |        "unknown" collapse)        |         |
+    |                    |            |--- no --> UNKNOWN                 |         |
+    |                    |                    |                   |         |
+    |                    |--UPSERT attendance on (user_id, work_date)-->|         |
+    |                    |     first_in_at set only once, last_seen_at  |         |
+    |                    |     bumped, punch_count++, distance + liveness|         |
+    |                    |     + spoof_flags recorded for audit          |         |
+    |<--201 {status: marked, work_date, first_in, last_seen}----|         |
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 5 - SPOOF DETECTION & ALERTING (anti photo-of-a-photo)
+--------------------------------------------------------------------------------
+                         +-------------------------------+
+                         |  THREE INDEPENDENT SIGNALS    |
+                         +-------------------------------+
+   (1) PASSIVE / per-frame                (2) ACTIVE / challenge
+   texture + colour + specular             randomised order +
+   print/screen artefacts, blur            randomised reveal time,
+   ratio, colour histogram                single-use token, TTL,
+   flatness, edge density                  max attempts + lockout
+            |                                          |
+            |                                    +-----v------+
+            |                                    | liveness    |
+            |                                    | session FSM |
+            |                                    +-----+------+
+            |                                          |
+            |  (3) DEEP / optional
+            |  miniFASNet ONNX (1.8 MB)
+            |  texture-spectrum CNN
+            +------------------+-----------------------+
+                               |
+                     +---------v---------+
+                     | score fusion     |   weighted sum of available signals
+                     | 0..1             |   (configured weights, not ad-hoc)
+                     +---------+---------+
+                               |
+            +------------------+-------------------+
+            |                                      |
+      ( ) score >= PASSIVE_LIVENESS_MIN ?     ( ) >= configured
+            | yes -> allow                        classify threshold ?
+            | no --> SPARE CLASSIFIER               yes -> ALLOW
+            |         (never auto-punish,           no  -> REJECT + ALERT
+            |          queue for review)                   |
+            |                                               v
+            |                              +--------------------------+
+            |                              | events row               |
+            |                              | kind = 'spoof_detected'   |
+            |                              | severity = 'critical'     |
+            |                              | context = {score, signals,|
+            |                              |   user_id, device_id,     |
+            |                              |   session_id, thumbnail?} |
+            |                              +------------+--------------+
+            |                                           |
+            |                                           |  --> POST ALERT_WEBHOOK_URL
+            |                                           |      {Slack / PagerDuty / SIEM}
+            |                                           |
+            |                        ( ) same user_id within window?
+            |                             | yes --> bump counter, escalate
+            |                             |          severity on N strikes
+            |                             | no  --> first strike, log
+            v
+     REJECT: 403 with a neutral message to the person, detailed reason
+             to the operator. Never reveal which signal failed - that is
+             free guidance for tuning a spoof against your system.
+
+  Hard rule enforced in code: with REQUIRE_LIVENESS=true there is no code path
+  that writes an attendance row without a consumed, unexpired liveness token
+  belonging to the matched user. Verified by a test, not by convention.
+
+  Spoof flags are stored on the attendance row even when the punch succeeds,
+  so a later audit can re-score historical punches without re-processing
+  images (images are not retained by default - see the data-retention table).
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 6 - DEPLOYMENT TOPOLOGY
+--------------------------------------------------------------------------------
+   Option A - single box (fits 1..5 gates)         Option B - edge + core
+   +-----------------------------+                +----------------------------+
+   |  kiosk (Raspberry Pi / PC)   |                |  edge gateway per site      |
+   |  python app, camera, --      |                |  frames -> HTTPS, no PII    |
+   |  in-memory roster cache      |                +-------------+--------------+
+   +--------------+--------------+                              |
+                  | HTTPS                              LAN/TLS   |
+                  v                                              v
+   +-----------------------------+                +----------------------------+
+   |  API host (VM)               |                |  core API (FastAPI, N wkr) |
+   |  uvicorn -w 4                |                +-------------+--------------+
+   |  - 1 ML model load per wkr   |                              |
+   +--------------+--------------+                  +-----------+-----------+
+                  |                                 |                   |
+                  v                                 v                   v
+          +---------------+              +------------------+   +------------------+
+          | SQLite on     |              | Postgres (opt)   |   | object store     |
+          | attached vol  |              | multi-node       |   | (audit snapshots)|
+          | + snapshot crt|              +------------------+   +------------------+
+          +---------------+
+
+   Non-negotiables for the deployable build:
+   1. opencv-python-HEADLESS in the server image. GUI cv2.imshow/waitKey has
+      no display in a container and is a hard crash, not a warning.
+   2. Python 3.11/3.12. TensorFlow (via DeepFace) has no 3.13/3.14 wheels.
+      Pin the runtime, do not "upgrade" the image casually.
+   3. Never write temp JPEGs to disk per frame. Decode bytes -> numpy array
+      and pass the array straight to the model. The notebook's temp file dance
+      exists only because DeepFace's default path handling wanted a file.
+   4. One model load per worker process, at startup, behind a lazy singleton.
+      Reloading Facenet per request is a 1-2 s stall per punch.
+   5. Frame intake is stateless: no VideoCapture in the server. The camera
+      belongs to the kiosk; the server receives stills or a short burst.
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 7 - ERROR / FAILURE BEHAVIOUR
+--------------------------------------------------------------------------------
+  condition                          | response        | attendance written?
+  -----------------------------------+-----------------+---------------------
+  no face in frame                    | 422 no_face     | no
+  face found, no roster match         | 404 unknown     | no
+  borderline distance (gray zone)     | 202 review      | no (flagged, queued)
+  liveness not passed, required       | 428 required    | no
+  liveness session expired            | 410 expired     | no
+  liveness attempts exhausted         | 429 locked      | no + alert
+  token already consumed              | 409 conflict    | no
+  punch repeated same business day    | 200 already_in  | yes (updated, not dup)
+  upload over MAX_UPLOAD_BYTES        | 413 too_large   | no
+  model load failure at boot          | 503 unavailable | no
+  db unreachable                      | 503 unavailable | no
+  duplicate punch race (2 kiosks)     | 200 already_in  | yes, exactly one row
+
+  The 409/200 pair matters: the (user_id, work_date) UNIQUE constraint is the
+  only thing standing between a flaky kiosk retry and 400 duplicate rows.
+
+
+--------------------------------------------------------------------------------
+ DIAGRAM 8 - OBSERVABILITY
+--------------------------------------------------------------------------------
+  every request --> structured log {request_id, route, ms, status, model}
+                 +--> Prometheus counters/histograms:
+                       face_punch_total{status=marked|review|unknown|spoof}
+                       liveness_attempts_total{result}
+                       match_distance_histogram
+                       embedding_latency_seconds
+                 +--> events table (domain-level audit, survives restarts)
+                 +--> alert webhook (only on spoof / lockout / repeated failure)
+
+  Dashboards that answer the only three questions that matter:
+    1. Is it up?            -> uptime, p95 latency, error rate
+    2. Is it accurate?      -> % review + % unknown per day/site (drift alarm)
+    3. Is it being attacked? -> spoof events per hour, devices, lockouts
+
+================================================================================
+ END OF FLOWCHART PACK
+================================================================================
